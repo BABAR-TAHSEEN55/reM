@@ -93,12 +93,9 @@ sequenceDiagram
     participant W as OpenCV window
 
     C->>R: BGR frame
-    R->>R: Keep original; mirror display frame
-    par Gesture inference
-        R->>G: RGB frame + monotonic timestamp
-    and Face inference
-        R->>F: RGB frame + timestamp (initially, then every second frame)
-    end
+    R->>R: Keep original and mirror display frame
+    R->>G: Start gesture inference with RGB frame and timestamp
+    R->>F: Start face inference with RGB frame and timestamp when due
     G-->>R: Hand landmarks, handedness, gesture categories
     F-->>R: Face landmarks and blendshapes
     R->>A: Evaluate configured candidates
