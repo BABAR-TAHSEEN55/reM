@@ -22,6 +22,7 @@ It is for playful, camera-based interaction experiments—not a web service or c
 - [Testing](#testing)
 - [Project structure](#project-structure)
 - [Troubleshooting and limitations](#troubleshooting-and-limitations)
+- [License](#license)
 
 ## Overview
 
@@ -283,4 +284,8 @@ reM/
 - The project is designed around a local graphical webcam workflow; cross-platform compatibility is not established.
 - Recognition thresholds are heuristics configured in code. The repository provides no accuracy benchmarks or calibration automation.
 - The app relies on the bundled MediaPipe models and configured local media assets being present.
-- No license file or asset/model provenance is included in this repository.
+- Asset and model provenance is not documented in this repository.
+
+## License
+
+Copyright © 2026 Suho Kim. Licensed under the [MIT License](LICENSE).
