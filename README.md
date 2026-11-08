@@ -93,8 +93,9 @@ sequenceDiagram
 
     C->>R: BGR frame
     R->>R: Keep original; mirror display frame
-    par Local inference
+    par Gesture inference
         R->>G: RGB frame + monotonic timestamp
+    and Face inference
         R->>F: RGB frame + timestamp (initially, then every second frame)
     end
     G-->>R: Hand landmarks, handedness, gesture categories
