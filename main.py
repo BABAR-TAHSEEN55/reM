@@ -1,6 +1,6 @@
 import argparse
 
-from utils.gestures import main as run_camera
+from rem.runtime import main as run_camera
 
 
 def main():
