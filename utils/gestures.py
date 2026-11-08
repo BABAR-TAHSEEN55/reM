@@ -42,9 +42,12 @@ CAMERA_HEIGHT = 480
 INFERENCE_SIZE = (640, 360)
 FPS_REPORT_INTERVAL = 30
 DEBUG_METRICS_INTERVAL = 0.2
+FACE_HAND_POSE_HOLD_SECONDS = 0.35
 T_SIGN_PALM_DISTANCE_FACTOR = 2.0
 T_SIGN_DIRECTION_RATIO = 0.75
 T_SIGN_PERPENDICULAR_ERROR_DEGREES = 25.0
+HEAD_GRAB_EYE_MARGIN_FACTOR = 0.30
+CHEEK_BELOW_EYE_FACTOR = 0.32
 
 HAND_CONNECTIONS = (
     (0, 1),
@@ -99,7 +102,9 @@ class HandsOnFaceMetrics:
 
     @property
     def matches(self):
-        return self.together and self.centered and self.on_lower_face and self.fingers_up
+        return (
+            self.together and self.centered and self.on_lower_face and self.fingers_up
+        )
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,8 @@ GESTURE_MEDIA = {
     ),
     "tongue_out": MediaConfig("dog_tongue_out.jpg", "image", 2.0, 3.0, 40, 0.10),
     "hands_on_face": MediaConfig("hands_on_face.jpg", "image", 2.0, 3.0, 90, 0.18),
+    "head_grab": MediaConfig("headgrab.jpeg", "image", 2.0, 3.0, 89, 0.05),
+    "hands_on_cheeks": MediaConfig("cheeks.jpeg", "image", 2.0, 3.0, 87, 0.05),
     "t_sign": MediaConfig("T_sign.jpg", "image", 2.0, 3.0, 85, 0.15),
     "explaining_hands": MediaConfig(
         "hands_talking_to_wall.gif", "gif", 5.0, 5.0, 80, 0.20
@@ -165,6 +172,7 @@ class RuntimeState:
         default_factory=lambda: {"Left": deque(), "Right": deque()}
     )
     hands_on_face_frames: int = 0
+    face_hand_pose_until: float = 0.0
     last_debug_metrics_at: float = 0.0
     suppress_until_clear: bool = False
 
@@ -195,7 +203,9 @@ def load_media():
             image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
             if image is None:
                 raise ValueError(f"Could not decode image {path}")
-            media[name] = LoadedMedia("image", [resize_media(normalize_bgra(image))], [0.0])
+            media[name] = LoadedMedia(
+                "image", [resize_media(normalize_bgra(image))], [0.0]
+            )
         elif config.type == "gif":
             frames, durations = [], []
             with Image.open(path) as gif:
@@ -301,14 +311,70 @@ def hands_together_on_face(left, right, face):
     return hands_together_on_face_metrics(left, right, face).matches
 
 
+def hands_on_cheeks(left, right, face):
+    face_width = abs(face[454].x - face[234].x)
+    nose = face[1]
+    eye_line_y = (face[33].y + face[263].y) / 2
+    chin_y = face[152].y
+    left_palm, right_palm = left[9], right[9]
+    palm_distance = hypot(left_palm.x - right_palm.x, left_palm.y - right_palm.y)
+
+    def on_cheek(palm, side, is_left):
+        return (
+            hypot(palm.x - side.x, palm.y - side.y) < face_width * 0.45
+            and eye_line_y + face_width * CHEEK_BELOW_EYE_FACTOR <= palm.y <= chin_y
+            and (
+                palm.x < nose.x - face_width * 0.15
+                if is_left
+                else palm.x > nose.x + face_width * 0.15
+            )
+        )
+
+    return palm_distance > face_width * 0.6 and (
+        (
+            on_cheek(left_palm, face[234], True)
+            and on_cheek(right_palm, face[454], False)
+        )
+        or (
+            on_cheek(left_palm, face[454], False)
+            and on_cheek(right_palm, face[234], True)
+        )
+    )
+
+
+def hands_on_head(left, right, face):
+    face_width = abs(face[454].x - face[234].x)
+    nose = face[1]
+    eye_line_y = (face[33].y + face[263].y) / 2
+    head_grab_limit_y = eye_line_y + face_width * HEAD_GRAB_EYE_MARGIN_FACTOR
+    left_palm, right_palm = left[9], right[9]
+    return (
+        left_palm.y < head_grab_limit_y
+        and right_palm.y < head_grab_limit_y
+        and (
+            (
+                left_palm.x < nose.x - face_width * 0.1
+                and right_palm.x > nose.x + face_width * 0.1
+            )
+            or (
+                right_palm.x < nose.x - face_width * 0.1
+                and left_palm.x > nose.x + face_width * 0.1
+            )
+        )
+    )
+
+
 def hand_open(hand):
     wrist = hand[0]
     fingers = ((8, 6), (12, 10), (16, 14), (20, 18))
-    return sum(
-        hypot(hand[tip].x - wrist.x, hand[tip].y - wrist.y)
-        > hypot(hand[pip].x - wrist.x, hand[pip].y - wrist.y)
-        for tip, pip in fingers
-    ) >= 3
+    return (
+        sum(
+            hypot(hand[tip].x - wrist.x, hand[tip].y - wrist.y)
+            > hypot(hand[pip].x - wrist.x, hand[pip].y - wrist.y)
+            for tip, pip in fingers
+        )
+        >= 3
+    )
 
 
 def hand_angle(hand):
@@ -325,10 +391,22 @@ def t_sign_metrics(left, right):
     left_angle, right_angle = hand_angle(left), hand_angle(right)
     angle_difference = abs(left_angle - right_angle) % 180
     perpendicular_error = abs(90 - angle_difference)
-    left_horizontal = abs(left[12].y - left[0].y) <= abs(left[12].x - left[0].x) * T_SIGN_DIRECTION_RATIO
-    right_horizontal = abs(right[12].y - right[0].y) <= abs(right[12].x - right[0].x) * T_SIGN_DIRECTION_RATIO
-    left_vertical = abs(left[12].x - left[0].x) <= abs(left[12].y - left[0].y) * T_SIGN_DIRECTION_RATIO
-    right_vertical = abs(right[12].x - right[0].x) <= abs(right[12].y - right[0].y) * T_SIGN_DIRECTION_RATIO
+    left_horizontal = (
+        abs(left[12].y - left[0].y)
+        <= abs(left[12].x - left[0].x) * T_SIGN_DIRECTION_RATIO
+    )
+    right_horizontal = (
+        abs(right[12].y - right[0].y)
+        <= abs(right[12].x - right[0].x) * T_SIGN_DIRECTION_RATIO
+    )
+    left_vertical = (
+        abs(left[12].x - left[0].x)
+        <= abs(left[12].y - left[0].y) * T_SIGN_DIRECTION_RATIO
+    )
+    right_vertical = (
+        abs(right[12].x - right[0].x)
+        <= abs(right[12].y - right[0].y) * T_SIGN_DIRECTION_RATIO
+    )
     return TSignMetrics(
         palm_distance,
         palm_distance_threshold,
@@ -426,25 +504,26 @@ def log_debug_metrics(face, face_blendshapes, hands, gesture_result, state, now)
     mouth_gap = abs(face[13].y - face[14].y)
     scores = blendshape_scores(face_blendshapes)
     frown_left, frown_right = frown_scores(scores)
-    smile_left, smile_right = smile_scores(scores)
     face_width = abs(face[454].x - face[234].x)
     nose = face[1]
     left_hand, right_hand = hands.get("Left"), hands.get("Right")
     nose_distances = {
-        side: hand_near_nose_metrics(hand, nose, face_width) for side, hand in hands.items()
+        side: hand_near_nose_metrics(hand, nose, face_width)
+        for side, hand in hands.items()
     }
-    hands_near_nose = any(distance < threshold for distance, threshold in nose_distances.values())
-    nose_distance_text = ",".join(
-        f"{side}={distance:.3f}/{threshold:.3f}"
-        for side, (distance, threshold) in nose_distances.items()
-    ) or "n/a"
+    hands_near_nose = any(
+        distance < threshold for distance, threshold in nose_distances.values()
+    )
+    nose_distance_text = (
+        ",".join(
+            f"{side}={distance:.3f}/{threshold:.3f}"
+            for side, (distance, threshold) in nose_distances.items()
+        )
+        or "n/a"
+    )
     prefix = (
         f"debug | mouth={mouth_gap:.3f}/{MOUTH_OPEN_THRESHOLD:.3f} "
         f"frown={frown_left:.2f},{frown_right:.2f}/{FROWN_THRESHOLD:.2f} "
-        f"smile={smile_left:.2f},{smile_right:.2f}/{SMILE_THRESHOLD:.2f} "
-        f"blink={scores.get('eyeBlinkLeft', 0.0):.2f},{scores.get('eyeBlinkRight', 0.0):.2f}/{EYE_CLOSED_THRESHOLD:.2f} "
-        f"pucker={scores.get('mouthPucker', 0.0):.2f}/{ROUND_MOUTH_PUCKER_THRESHOLD:.2f} "
-        f"jaw={scores.get('jawOpen', 0.0):.2f}/{ROUND_MOUTH_JAW_THRESHOLD:.2f} "
         f"face_width={face_width:.3f} nose={nose_distance_text} "
         f"near_nose={int(hands_near_nose)} "
         f"open_palm={int(is_open_palm(gesture_result))} "
@@ -456,7 +535,8 @@ def log_debug_metrics(face, face_blendshapes, hands, gesture_result, state, now)
         return
 
     metrics = hands_together_on_face_metrics(left_hand, right_hand, face)
-    t_metrics = t_sign_metrics(left_hand, right_hand)
+    head_grab = hands_on_head(left_hand, right_hand, face)
+    cheeks = hands_on_cheeks(left_hand, right_hand, face)
     print(
         f"{prefix} | palms={metrics.palm_distance:.3f}/{metrics.palm_distance_threshold:.3f} "
         f"center={metrics.nose_offset:.3f}/{metrics.nose_offset_threshold:.3f} "
@@ -464,10 +544,7 @@ def log_debug_metrics(face, face_blendshapes, hands, gesture_result, state, now)
         f"strict=together={int(metrics.together)} centered={int(metrics.centered)} "
         f"lower_face={int(metrics.on_lower_face)} fingers_up={int(metrics.fingers_up)} "
         f"confirm={state.hands_on_face_frames}/{HANDS_ON_FACE_CONFIRMATION_FRAMES} "
-        f"t=palms={t_metrics.palm_distance:.3f}/{t_metrics.palm_distance_threshold:.3f} "
-        f"angles={t_metrics.left_angle:.0f},{t_metrics.right_angle:.0f} "
-        f"perp_error={t_metrics.perpendicular_error:.0f}/{T_SIGN_PERPENDICULAR_ERROR_DEGREES:.0f} "
-        f"match={int(t_metrics.matches)}",
+        f"head_grab={int(head_grab)} cheeks={int(cheeks)}",
         flush=True,
     )
 
@@ -487,9 +564,25 @@ def draw_debug_landmarks(frame, face, hands, state):
     frame_height, frame_width = frame.shape[:2]
     if face is not None:
         for landmark in face:
-            cv2.circle(frame, mirrored_point(landmark, frame_width, frame_height), 1, (80, 80, 80), -1)
-        for index, color in ((1, (0, 255, 255)), (168, (255, 255, 0)), (152, (0, 255, 0))):
-            cv2.circle(frame, mirrored_point(face[index], frame_width, frame_height), 4, color, -1)
+            cv2.circle(
+                frame,
+                mirrored_point(landmark, frame_width, frame_height),
+                1,
+                (80, 80, 80),
+                -1,
+            )
+        for index, color in (
+            (1, (0, 255, 255)),
+            (168, (255, 255, 0)),
+            (152, (0, 255, 0)),
+        ):
+            cv2.circle(
+                frame,
+                mirrored_point(face[index], frame_width, frame_height),
+                4,
+                color,
+                -1,
+            )
 
     colors = {"Left": (255, 120, 0), "Right": (255, 0, 255)}
     for side, hand in hands.items():
@@ -503,12 +596,15 @@ def draw_debug_landmarks(frame, face, hands, state):
                 2,
             )
         for landmark in hand:
-            cv2.circle(frame, mirrored_point(landmark, frame_width, frame_height), 3, color, -1)
+            cv2.circle(
+                frame, mirrored_point(landmark, frame_width, frame_height), 3, color, -1
+            )
 
     left_hand, right_hand = hands.get("Left"), hands.get("Right")
     if face is not None and left_hand and right_hand:
         metrics = hands_together_on_face_metrics(left_hand, right_hand, face)
-        t_metrics = t_sign_metrics(left_hand, right_hand)
+        head_grab = hands_on_head(left_hand, right_hand, face)
+        cheeks = hands_on_cheeks(left_hand, right_hand, face)
         midpoint = mirrored_coordinates(
             metrics.midpoint_x, metrics.midpoint_y, frame_width, frame_height
         )
@@ -517,14 +613,16 @@ def draw_debug_landmarks(frame, face, hands, state):
             f"strict T{int(metrics.together)} C{int(metrics.centered)} "
             f"L{int(metrics.on_lower_face)} F{int(metrics.fingers_up)} "
             f"{state.hands_on_face_frames}/{HANDS_ON_FACE_CONFIRMATION_FRAMES} "
-            f"T-sign {int(t_metrics.matches)}"
+            f"head {int(head_grab)} cheeks {int(cheeks)}"
         )
     else:
         status = f"strict n/a {state.hands_on_face_frames}/{HANDS_ON_FACE_CONFIRMATION_FRAMES}"
-    cv2.putText(frame, status, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    cv2.putText(
+        frame, status, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2
+    )
 
 
-def detect_candidates(face, face_blendshapes, hands, gesture_result, state):
+def detect_candidates(face, face_blendshapes, hands, gesture_result, state, now):
     if face is None:
         return set()
 
@@ -545,8 +643,14 @@ def detect_candidates(face, face_blendshapes, hands, gesture_result, state):
     if is_smiling(scores):
         candidates.add("smile")
     left_hand, right_hand = hands.get("Left"), hands.get("Right")
-    hands_near_nose = any(hand_near_nose(hand, nose, face_width) for hand in hands.values())
-    t_sign = left_hand is not None and right_hand is not None and t_sign_metrics(left_hand, right_hand).matches
+    hands_near_nose = any(
+        hand_near_nose(hand, nose, face_width) for hand in hands.values()
+    )
+    t_sign = (
+        left_hand is not None
+        and right_hand is not None
+        and t_sign_metrics(left_hand, right_hand).matches
+    )
     if t_sign:
         candidates.add("t_sign")
     if is_open_palm(gesture_result) and not hands_near_nose and not t_sign:
@@ -554,17 +658,34 @@ def detect_candidates(face, face_blendshapes, hands, gesture_result, state):
     if left_hand and right_hand:
         left_near_nose = hand_near_nose(left_hand, nose, face_width)
         right_near_nose = hand_near_nose(right_hand, nose, face_width)
-        if t_sign:
+        if hands_on_head(left_hand, right_hand, face):
             state.hands_on_face_frames = 0
-        elif left_near_nose and right_near_nose and hands_together_on_face(left_hand, right_hand, face):
+            state.face_hand_pose_until = now + FACE_HAND_POSE_HOLD_SECONDS
+            candidates.add("head_grab")
+        elif hands_on_cheeks(left_hand, right_hand, face):
+            state.hands_on_face_frames = 0
+            state.face_hand_pose_until = now + FACE_HAND_POSE_HOLD_SECONDS
+            candidates.add("hands_on_cheeks")
+        elif t_sign:
+            state.hands_on_face_frames = 0
+        elif (
+            left_near_nose
+            and right_near_nose
+            and hands_together_on_face(left_hand, right_hand, face)
+        ):
             state.hands_on_face_frames += 1
+            state.face_hand_pose_until = now + FACE_HAND_POSE_HOLD_SECONDS
             if state.hands_on_face_frames >= HANDS_ON_FACE_CONFIRMATION_FRAMES:
                 candidates.add("hands_on_face")
         elif left_near_nose and not right_near_nose:
             state.hands_on_face_frames = 0
             if vertical_wave(state.hand_history["Right"]):
                 candidates.add("left_nose_right_wave")
-        elif not left_near_nose and not right_near_nose:
+        elif (
+            not left_near_nose
+            and not right_near_nose
+            and now >= state.face_hand_pose_until
+        ):
             state.hands_on_face_frames = 0
             if (
                 hand_motion(state.hand_history["Left"])
@@ -586,6 +707,7 @@ def reset_detection_state(state):
     state.cooldown_until.clear()
     state.consumed.clear()
     state.hands_on_face_frames = 0
+    state.face_hand_pose_until = 0.0
     state.suppress_until_clear = False
     for history in state.hand_history.values():
         history.clear()
@@ -593,6 +715,13 @@ def reset_detection_state(state):
 
 def update_active_media(state, candidates, has_face, now):
     if state.active and now >= state.active.expires_at:
+        state.active = None
+
+    if (
+        state.active
+        and state.active.name == "explaining_hands"
+        and candidates.intersection({"hands_on_face", "hands_on_cheeks", "head_grab"})
+    ):
         state.active = None
 
     state.consumed.intersection_update(candidates)
@@ -611,7 +740,9 @@ def update_active_media(state, candidates, has_face, now):
         for name in candidates
         if name not in state.consumed and now >= state.cooldown_until.get(name, 0.0)
     ]
-    selected = max(eligible, key=lambda name: GESTURE_MEDIA[name].priority, default=None)
+    selected = max(
+        eligible, key=lambda name: GESTURE_MEDIA[name].priority, default=None
+    )
     if selected != state.candidate:
         state.candidate = selected
         state.candidate_started_at = now if selected else None
@@ -624,7 +755,9 @@ def update_active_media(state, candidates, has_face, now):
         return
 
     config = GESTURE_MEDIA[selected]
-    minimum_lock = GIF_MIN_LOCK_SECONDS if config.type == "gif" else IMAGE_MIN_LOCK_SECONDS
+    minimum_lock = (
+        GIF_MIN_LOCK_SECONDS if config.type == "gif" else IMAGE_MIN_LOCK_SECONDS
+    )
     duration = max(config.duration, minimum_lock)
     state.active = ActiveMedia(selected, now, now + duration)
     state.cooldown_until[selected] = now + config.cooldown
@@ -666,7 +799,9 @@ def open_camera(camera_index):
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f"Camera: {actual_width}x{actual_height}, buffer size requested: 1", flush=True)
+    print(
+        f"Camera: {actual_width}x{actual_height}, buffer size requested: 1", flush=True
+    )
     return cap
 
 
@@ -682,7 +817,7 @@ def timed_inference(detector, image, timestamp):
     return detector(image, timestamp), time.perf_counter() - started_at
 
 
-def main(camera_index=1):
+def main(camera_index=1, debug=False):
     media = load_media()
     gesture_options = vision.GestureRecognizerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(GESTURE_MODEL_PATH)),
@@ -736,7 +871,8 @@ def main(camera_index=1):
                     gesture_timestamp,
                 )
                 should_detect_face = (
-                    last_face_result is None or frame_index % FACE_INFERENCE_INTERVAL == 0
+                    last_face_result is None
+                    or frame_index % FACE_INFERENCE_INTERVAL == 0
                 )
                 face_future = None
                 if should_detect_face:
@@ -757,17 +893,37 @@ def main(camera_index=1):
                     face_seconds += elapsed
                     face_calls += 1
                 face_result = last_face_result
-                face = face_result.face_landmarks[0] if face_result.face_landmarks else None
+                face = (
+                    face_result.face_landmarks[0]
+                    if face_result.face_landmarks
+                    else None
+                )
                 if face is not None:
                     last_face, last_face_time = face, now
-                elif last_face is not None and now - last_face_time < FACE_FALLBACK_SECONDS:
+                elif (
+                    last_face is not None
+                    and now - last_face_time < FACE_FALLBACK_SECONDS
+                ):
                     face = last_face
                 hands = physical_hands(gesture_result)
                 update_hand_history(state, hands, now)
                 candidates = detect_candidates(
-                    face, face_result.face_blendshapes, hands, gesture_result, state
+                    face,
+                    face_result.face_blendshapes,
+                    hands,
+                    gesture_result,
+                    state,
+                    now,
                 )
-                log_debug_metrics(face, face_result.face_blendshapes, hands, gesture_result, state, now)
+                if debug:
+                    log_debug_metrics(
+                        face,
+                        face_result.face_blendshapes,
+                        hands,
+                        gesture_result,
+                        state,
+                        now,
+                    )
                 update_active_media(state, candidates, face is not None, now)
 
                 if state.active and face is not None:
@@ -776,15 +932,20 @@ def main(camera_index=1):
                         int((1.0 - nose.x) * raw_frame.shape[1]),
                         int(nose.y * raw_frame.shape[0]),
                     )
-                    overlay_media(display_frame, active_frame(state.active, media, now), center)
-                draw_debug_landmarks(display_frame, face, hands, state)
+                    overlay_media(
+                        display_frame, active_frame(state.active, media, now), center
+                    )
+                if debug:
+                    draw_debug_landmarks(display_frame, face, hands, state)
 
             cv2.imshow("meme camera", display_frame)
             fps_frame_count += 1
             frame_index += 1
             if fps_frame_count == FPS_REPORT_INTERVAL:
                 elapsed = time.monotonic() - fps_started_at
-                gesture_ms = 1000 * gesture_seconds / gesture_calls if gesture_calls else 0.0
+                gesture_ms = (
+                    1000 * gesture_seconds / gesture_calls if gesture_calls else 0.0
+                )
                 face_ms = 1000 * face_seconds / face_calls if face_calls else 0.0
                 print(
                     f"{FPS_REPORT_INTERVAL / elapsed:.1f} fps | "
