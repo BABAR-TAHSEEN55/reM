@@ -69,3 +69,19 @@ GESTURE_MEDIA = {
     "open_palm": MediaConfig("hold_up_hand_forward.jpg", "image", 2.0, 2.0, 10, 0.10),
     "smile": MediaConfig("smile_dog.jpg", "image", 2.0, 3.0, 35, 0.15),
 }
+
+MEME_DESCRIPTIONS = {
+    "lips_down": "Frown with both mouth corners pulled downward.",
+    "left_nose_right_wave": "Keep your left hand near your nose while waving your right hand vertically.",
+    "tongue_out": "Open your mouth wide enough for the mouth-open landmark to trigger.",
+    "hands_on_face": "Press both palms together over your nose or mouth with fingers pointing upward.",
+    "head_grab": "Place both hands on opposite sides of the top of your head.",
+    "hands_on_cheeks": "Place separated palms on opposite cheeks, below your eye line.",
+    "t_sign": "Make a T with two nearby open hands, one horizontal and one vertical.",
+    "explaining_hands": "Move both hands while neither hand is near your nose.",
+    "mouth_round": "Make a rounded, puckered mouth with a slightly open jaw.",
+    "horse_smirk": "Make a pronounced one-sided smile.",
+    "eyes_closed": "Close or almost close both eyes.",
+    "open_palm": "Show an open palm away from your face.",
+    "smile": "Smile evenly with both mouth corners raised.",
+}
