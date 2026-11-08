@@ -1,10 +1,8 @@
-from utils.img_display import show_image
+from utils.gestures import main as run_camera
 
 
 def main():
-    # print("Hello from rem!")
-    # record_camera()
-    show_image()
+    run_camera()
 
 
 if __name__ == "__main__":
