@@ -49,21 +49,21 @@ There is no browser frontend, HTTP API, database, account system, remote storage
 
 ```mermaid
 flowchart LR
-    Camera[Webcam]
-    Assets[Local meme images & GIFs\nmemes/]
-    GestureModel[gesture_recognizer.task]
-    FaceModel[face_landmarker.task]
+    Camera["Webcam"]
+    Assets["Local meme images and GIFs<br/>memes/"]
+    GestureModel["gesture_recognizer.task"]
+    FaceModel["face_landmarker.task"]
 
-    subgraph App[Local Python process]
-        Capture[OpenCV capture\nV4L2 first, fallback backend]
-        Prepare[Frame preparation\nBGR → RGB]
-        Gesture[MediaPipe Gesture Recognizer\nup to two hands]
-        Face[MediaPipe Face Landmarker\none face + blendshapes]
-        Rules[Custom candidate rules\ngeometry, blendshapes, motion]
-        State[In-memory state\npriority, debounce, cooldown]
-        Media[Media loader & GIF timing]
-        Overlay[Alpha overlay at\nface nose landmark]
-        Display[OpenCV window\nmirrored camera view]
+    subgraph App["Local Python process"]
+        Capture["OpenCV capture<br/>V4L2 first, fallback backend"]
+        Prepare["Frame preparation<br/>BGR to RGB"]
+        Gesture["MediaPipe Gesture Recognizer<br/>up to two hands"]
+        Face["MediaPipe Face Landmarker<br/>one face and blendshapes"]
+        Rules["Custom candidate rules<br/>geometry, blendshapes, motion"]
+        State["In-memory state<br/>priority, debounce, cooldown"]
+        Media["Media loader and GIF timing"]
+        Overlay["Alpha overlay at<br/>face nose landmark"]
+        Display["OpenCV window<br/>mirrored camera view"]
     end
 
     Camera --> Capture --> Prepare
@@ -99,9 +99,9 @@ sequenceDiagram
     G-->>R: Hand landmarks, handedness, gesture categories
     F-->>R: Face landmarks and blendshapes
     R->>A: Evaluate configured candidates
-    A->>A: Select highest-priority eligible gesture; debounce
+    A->>A: Select highest-priority eligible gesture, then debounce
     alt Candidate activates
-        A-->>M: Active media + expiry
+        A-->>M: Active media and expiry
         M->>M: Select image or looping GIF frame
         M->>W: Alpha-blend near nose landmark
     end
