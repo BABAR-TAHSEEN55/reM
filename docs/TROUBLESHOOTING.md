@@ -74,7 +74,7 @@ Startup messages about XNNPACK, feedback tensors, or landmark projection are com
 
 ### Hands-on-face is flaky
 
-The rule needs two recognized hands, palms together near the nose or mouth, fingers up, and three matching frames. Keep both hands visible to the camera and avoid covering the entire eye region. reM keeps the last face landmarks for 0.5 seconds to help through brief face-tracker dropouts.
+The rule needs two recognized hands near the nose or mouth, fingers up, and three matching frames. Palm centers can be close together or the middle fingertips can meet while palms rest across the cheeks. Keep both hands visible to the camera and avoid covering the entire eye region. reM keeps the last face landmarks for 0.5 seconds to help through brief face-tracker dropouts.
 
 ### Head-grab or cheeks does not trigger
 
