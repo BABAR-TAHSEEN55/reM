@@ -1,6 +1,7 @@
 import os
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from math import hypot
 from pathlib import Path
@@ -18,11 +19,18 @@ ROOT = Path(__file__).resolve().parents[1]
 GESTURE_MODEL_PATH = ROOT / "gesture_recognizer.task"
 FACE_MODEL_PATH = ROOT / "face_landmarker.task"
 MEME_WIDTH = 420
-DEBOUNCE_SECONDS = 0.25
 IMAGE_MIN_LOCK_SECONDS = 2.0
 GIF_MIN_LOCK_SECONDS = 5.0
 MOUTH_OPEN_THRESHOLD = 0.03
-MOTION_WINDOW_SECONDS = 0.7
+MOTION_WINDOW_SECONDS = 0.5
+VERTICAL_WAVE_MIN_SECONDS = 0.15
+VERTICAL_WAVE_MIN_DISTANCE = 0.065
+EXPLAINING_MOTION_THRESHOLD = 0.20
+FACE_INFERENCE_INTERVAL = 2
+CAMERA_WIDTH = 640
+CAMERA_HEIGHT = 480
+INFERENCE_SIZE = (640, 360)
+FPS_REPORT_INTERVAL = 30
 
 
 @dataclass(frozen=True)
@@ -32,17 +40,20 @@ class MediaConfig:
     duration: float
     cooldown: float
     priority: int
+    debounce: float
 
 
 GESTURE_MEDIA = {
-    "lips_down": MediaConfig("beluga.jpg", "image", 2.0, 3.0, 30),
+    "lips_down": MediaConfig("beluga.jpg", "image", 2.0, 3.0, 30, 0.12),
     "left_nose_right_wave": MediaConfig(
-        "dance_fox_hands_forward_wave_with_nose_touch.gif", "gif", 5.0, 5.0, 60
+        "dance_fox_hands_forward_wave_with_nose_touch.gif", "gif", 5.0, 5.0, 60, 0.20
     ),
-    "tongue_out": MediaConfig("dog_tongue_out.jpg", "image", 2.0, 3.0, 40),
-    "hands_on_face": MediaConfig("hands_on_face.jpg", "image", 2.0, 3.0, 50),
-    "explaining_hands": MediaConfig("hands_talking_to_wall.gif", "gif", 5.0, 5.0, 80),
-    "open_palm": MediaConfig("hold_up_hand_forward.jpg", "image", 2.0, 2.0, 10),
+    "tongue_out": MediaConfig("dog_tongue_out.jpg", "image", 2.0, 3.0, 40, 0.10),
+    "hands_on_face": MediaConfig("hands_on_face.jpg", "image", 2.0, 3.0, 50, 0.18),
+    "explaining_hands": MediaConfig(
+        "hands_talking_to_wall.gif", "gif", 5.0, 5.0, 80, 0.20
+    ),
+    "open_palm": MediaConfig("hold_up_hand_forward.jpg", "image", 2.0, 2.0, 10, 0.10),
 }
 
 
@@ -100,9 +111,7 @@ def load_media():
             image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
             if image is None:
                 raise ValueError(f"Could not decode image {path}")
-            media[name] = LoadedMedia(
-                "image", [resize_media(normalize_bgra(image))], [0.0]
-            )
+            media[name] = LoadedMedia("image", [resize_media(normalize_bgra(image))], [0.0])
         elif config.type == "gif":
             frames, durations = [], []
             with Image.open(path) as gif:
@@ -170,20 +179,16 @@ def hand_on_face(hand, face):
     margin = 0.08
     palm = hand[9]
     return (
-        min(face_left.x, face_right.x) - margin
-        <= palm.x
-        <= max(face_left.x, face_right.x) + margin
-        and min(face_top.y, face_bottom.y) - margin
-        <= palm.y
-        <= max(face_top.y, face_bottom.y) + margin
+        min(face_left.x, face_right.x) - margin <= palm.x <= max(face_left.x, face_right.x) + margin
+        and min(face_top.y, face_bottom.y) - margin <= palm.y <= max(face_top.y, face_bottom.y) + margin
     )
 
 
 def vertical_wave(history):
-    if len(history) < 3 or history[-1][0] - history[0][0] < 0.25:
+    if len(history) < 3 or history[-1][0] - history[0][0] < VERTICAL_WAVE_MIN_SECONDS:
         return False
     ys = [point[2] for point in history]
-    return max(ys) - min(ys) >= 0.08
+    return max(ys) - min(ys) >= VERTICAL_WAVE_MIN_DISTANCE
 
 
 def hand_motion(history):
@@ -198,13 +203,8 @@ def hand_motion(history):
 def is_frowning(face_blendshapes):
     if not face_blendshapes:
         return False
-    scores = {
-        category.category_name: category.score for category in face_blendshapes[0]
-    }
-    return (
-        scores.get("mouthFrownLeft", 0.0) >= 0.35
-        and scores.get("mouthFrownRight", 0.0) >= 0.35
-    )
+    scores = {category.category_name: category.score for category in face_blendshapes[0]}
+    return scores.get("mouthFrownLeft", 0.0) >= 0.35 and scores.get("mouthFrownRight", 0.0) >= 0.35
 
 
 def is_open_palm(gesture_result):
@@ -232,14 +232,12 @@ def detect_candidates(face, face_blendshapes, hands, gesture_result, state):
     if left_hand and right_hand:
         if hand_on_face(left_hand, face) and hand_on_face(right_hand, face):
             candidates.add("hands_on_face")
-        if hand_near_nose(left_hand, nose, face_width) and vertical_wave(
-            state.hand_history["Right"]
-        ):
+        if hand_near_nose(left_hand, nose, face_width) and vertical_wave(state.hand_history["Right"]):
             candidates.add("left_nose_right_wave")
         if (
             hand_motion(state.hand_history["Left"])
             + hand_motion(state.hand_history["Right"])
-            >= 0.24
+            >= EXPLAINING_MOTION_THRESHOLD
         ):
             candidates.add("explaining_hands")
     return candidates
@@ -276,9 +274,7 @@ def update_active_media(state, candidates, has_face, now):
         for name in candidates
         if name not in state.consumed and now >= state.cooldown_until.get(name, 0.0)
     ]
-    selected = max(
-        eligible, key=lambda name: GESTURE_MEDIA[name].priority, default=None
-    )
+    selected = max(eligible, key=lambda name: GESTURE_MEDIA[name].priority, default=None)
     if selected != state.candidate:
         state.candidate = selected
         state.candidate_started_at = now if selected else None
@@ -286,14 +282,12 @@ def update_active_media(state, candidates, has_face, now):
     if (
         selected is None
         or state.active is not None
-        or now - state.candidate_started_at < DEBOUNCE_SECONDS
+        or now - state.candidate_started_at < GESTURE_MEDIA[selected].debounce
     ):
         return
 
     config = GESTURE_MEDIA[selected]
-    minimum_lock = (
-        GIF_MIN_LOCK_SECONDS if config.type == "gif" else IMAGE_MIN_LOCK_SECONDS
-    )
+    minimum_lock = GIF_MIN_LOCK_SECONDS if config.type == "gif" else IMAGE_MIN_LOCK_SECONDS
     duration = max(config.duration, minimum_lock)
     state.active = ActiveMedia(selected, now, now + duration)
     state.cooldown_until[selected] = now + config.cooldown
@@ -321,6 +315,36 @@ def active_frame(active, media, now):
     return loaded.frames[-1]
 
 
+def open_camera(camera_index):
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        cap.release()
+        cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open camera {camera_index}")
+
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Camera: {actual_width}x{actual_height}, buffer size requested: 1", flush=True)
+    return cap
+
+
+def inference_frame(raw_frame):
+    height, width = raw_frame.shape[:2]
+    if width > CAMERA_WIDTH or height > CAMERA_HEIGHT:
+        return cv2.resize(raw_frame, INFERENCE_SIZE, interpolation=cv2.INTER_AREA)
+    return raw_frame
+
+
+def timed_inference(detector, image, timestamp):
+    started_at = time.perf_counter()
+    return detector(image, timestamp), time.perf_counter() - started_at
+
+
 def main(camera_index=1):
     media = load_media()
     gesture_options = vision.GestureRecognizerOptions(
@@ -336,16 +360,22 @@ def main(camera_index=1):
     )
     gesture_detector = vision.GestureRecognizer.create_from_options(gesture_options)
     face_detector = vision.FaceLandmarker.create_from_options(face_options)
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        gesture_detector.close()
-        face_detector.close()
-        raise RuntimeError(f"Could not open camera {camera_index}")
-
+    cap = None
+    executor = ThreadPoolExecutor(max_workers=2)
     state = RuntimeState()
     start = time.monotonic()
-    last_timestamp = -1
+    last_gesture_timestamp = -1
+    last_face_timestamp = -1
+    last_face_result = None
+    frame_index = 0
+    fps_started_at = time.monotonic()
+    fps_frame_count = 0
+    gesture_seconds = 0.0
+    gesture_calls = 0
+    face_seconds = 0.0
+    face_calls = 0
     try:
+        cap = open_camera(camera_index)
         while True:
             ok, raw_frame = cap.read()
             if not ok:
@@ -354,19 +384,41 @@ def main(camera_index=1):
             display_frame = cv2.flip(raw_frame, 1)
 
             if state.detection_enabled:
-                rgb = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
+                frame_for_detection = inference_frame(raw_frame)
+                rgb = cv2.cvtColor(frame_for_detection, cv2.COLOR_BGR2RGB)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                timestamp = max(int((now - start) * 1000), last_timestamp + 1)
-                last_timestamp = timestamp
-                gesture_result = gesture_detector.recognize_for_video(
-                    mp_image, timestamp
+                timestamp = int((now - start) * 1000)
+                gesture_timestamp = max(timestamp, last_gesture_timestamp + 1)
+                last_gesture_timestamp = gesture_timestamp
+                gesture_future = executor.submit(
+                    timed_inference,
+                    gesture_detector.recognize_for_video,
+                    mp_image,
+                    gesture_timestamp,
                 )
-                face_result = face_detector.detect_for_video(mp_image, timestamp)
-                face = (
-                    face_result.face_landmarks[0]
-                    if face_result.face_landmarks
-                    else None
+                should_detect_face = (
+                    last_face_result is None or frame_index % FACE_INFERENCE_INTERVAL == 0
                 )
+                face_future = None
+                if should_detect_face:
+                    face_timestamp = max(timestamp, last_face_timestamp + 1)
+                    last_face_timestamp = face_timestamp
+                    face_future = executor.submit(
+                        timed_inference,
+                        face_detector.detect_for_video,
+                        mp_image,
+                        face_timestamp,
+                    )
+
+                gesture_result, elapsed = gesture_future.result()
+                gesture_seconds += elapsed
+                gesture_calls += 1
+                if face_future:
+                    last_face_result, elapsed = face_future.result()
+                    face_seconds += elapsed
+                    face_calls += 1
+                face_result = last_face_result
+                face = face_result.face_landmarks[0] if face_result.face_landmarks else None
                 hands = physical_hands(gesture_result)
                 update_hand_history(state, hands, now)
                 candidates = detect_candidates(
@@ -380,22 +432,41 @@ def main(camera_index=1):
                         int((1.0 - nose.x) * raw_frame.shape[1]),
                         int(nose.y * raw_frame.shape[0]),
                     )
-                    overlay_media(
-                        display_frame, active_frame(state.active, media, now), center
-                    )
+                    overlay_media(display_frame, active_frame(state.active, media, now), center)
 
             cv2.imshow("meme camera", display_frame)
+            fps_frame_count += 1
+            frame_index += 1
+            if fps_frame_count == FPS_REPORT_INTERVAL:
+                elapsed = time.monotonic() - fps_started_at
+                gesture_ms = 1000 * gesture_seconds / gesture_calls if gesture_calls else 0.0
+                face_ms = 1000 * face_seconds / face_calls if face_calls else 0.0
+                print(
+                    f"{FPS_REPORT_INTERVAL / elapsed:.1f} fps | "
+                    f"gesture {gesture_ms:.1f} ms | face {face_ms:.1f} ms",
+                    flush=True,
+                )
+                fps_started_at = time.monotonic()
+                fps_frame_count = 0
+                gesture_seconds = 0.0
+                gesture_calls = 0
+                face_seconds = 0.0
+                face_calls = 0
+
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 break
             if key == ord("d"):
                 state.detection_enabled = not state.detection_enabled
                 reset_detection_state(state)
+                last_face_result = None
             elif key == ord("h"):
                 state.active = None
                 state.suppress_until_clear = True
     finally:
-        cap.release()
+        executor.shutdown(wait=True)
+        if cap:
+            cap.release()
         cv2.destroyAllWindows()
         gesture_detector.close()
         face_detector.close()
