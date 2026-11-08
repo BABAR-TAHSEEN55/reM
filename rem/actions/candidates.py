@@ -38,7 +38,15 @@ def detect_candidates(face, face_blendshapes, hands, gesture_result, state, now)
 
     left_near_nose = hand_near_nose(left_hand, nose, face_width)
     right_near_nose = hand_near_nose(right_hand, nose, face_width)
-    if head_grab.matches(left_hand, right_hand, face):
+    is_hands_on_face = (
+        left_near_nose and right_near_nose and hands_on_face(left_hand, right_hand, face)
+    )
+    if is_hands_on_face:
+        state.hands_on_face_frames += 1
+        state.face_hand_pose_until = now + config.FACE_HAND_POSE_HOLD_SECONDS
+        if state.hands_on_face_frames >= config.HANDS_ON_FACE_CONFIRMATION_FRAMES:
+            candidates.add("hands_on_face")
+    elif head_grab.matches(left_hand, right_hand, face):
         state.hands_on_face_frames = 0
         state.face_hand_pose_until = now + config.FACE_HAND_POSE_HOLD_SECONDS
         candidates.add("head_grab")
@@ -48,11 +56,6 @@ def detect_candidates(face, face_blendshapes, hands, gesture_result, state, now)
         candidates.add("hands_on_cheeks")
     elif is_t_sign:
         state.hands_on_face_frames = 0
-    elif left_near_nose and right_near_nose and hands_on_face(left_hand, right_hand, face):
-        state.hands_on_face_frames += 1
-        state.face_hand_pose_until = now + config.FACE_HAND_POSE_HOLD_SECONDS
-        if state.hands_on_face_frames >= config.HANDS_ON_FACE_CONFIRMATION_FRAMES:
-            candidates.add("hands_on_face")
     elif wave.matches(left_near_nose, state.hand_history["Right"]):
         state.hands_on_face_frames = 0
         candidates.add("left_nose_right_wave")

@@ -62,6 +62,20 @@ class GestureActionsTest(unittest.TestCase):
         candidates = detect_candidates(self.face, [], {"Left": left, "Right": right}, self.result, state, 0.0)
         self.assertEqual(candidates, {"hands_on_face"})
 
+    def test_fingertips_together_on_face_suppresses_cheeks(self):
+        left, right = make_hand(0.36, 0.70), make_hand(0.64, 0.70)
+        left[9], right[9] = point(0.36, 0.60), point(0.64, 0.60)
+        left[12], right[12] = point(0.48, 0.45), point(0.52, 0.45)
+        self.assertTrue(hands_on_cheeks(left, right, self.face))
+        state = RuntimeState()
+        for _ in range(2):
+            self.assertNotIn(
+                "hands_on_cheeks",
+                detect_candidates(self.face, [], {"Left": left, "Right": right}, self.result, state, 0.0),
+            )
+        candidates = detect_candidates(self.face, [], {"Left": left, "Right": right}, self.result, state, 0.0)
+        self.assertEqual(candidates, {"hands_on_face"})
+
     def test_t_sign_suppresses_open_palm_and_explaining(self):
         left, right = make_hand(0.4, 0.5), make_hand(0.5, 0.7)
         left[9], right[9] = point(0.5, 0.5), point(0.5, 0.6)

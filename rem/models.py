@@ -19,6 +19,8 @@ class HandsOnFaceMetrics:
     face_width: float
     palm_distance: float
     palm_distance_threshold: float
+    fingertip_distance: float
+    fingertip_distance_threshold: float
     nose_offset: float
     nose_offset_threshold: float
     midpoint_x: float
@@ -26,6 +28,7 @@ class HandsOnFaceMetrics:
     lower_face_top: float
     chin_y: float
     together: bool
+    fingertips_together: bool
     centered: bool
     on_lower_face: bool
     fingers_up: bool
