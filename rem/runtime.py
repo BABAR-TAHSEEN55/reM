@@ -50,7 +50,7 @@ def timed_inference(detector, image, timestamp):
     return detector(image, timestamp), time.perf_counter() - started_at
 
 
-def main(camera_index=1, debug=False):
+def main(camera_index=config.CAMERA_INDEX, debug=False):
     media = load_media()
     gesture_options = vision.GestureRecognizerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(config.GESTURE_MODEL_PATH)),
